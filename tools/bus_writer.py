@@ -21,11 +21,17 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+ROOT = Path(__file__).resolve().parent.parent
 PIPE_BUF_SAFE = 3800  # stay under 4096 with margin
 
 
 def _state_root() -> str:
-    return os.environ.get("BF_STATE_DIR", "/home/sandbox/state")
+    # Match the repo-relative default used by state.py / auth_manager.py /
+    # race_engine.py / ssrf_engine.py. The previous hardcoded POSIX default
+    # ("/home/sandbox/state") only existed inside the cloud sandbox: off-sandbox
+    # (e.g. Windows) it resolved elsewhere than every other engine's state dir,
+    # splitting the findings bus so kill_chain.py scored the wrong directory.
+    return os.environ.get("BF_STATE_DIR", str(ROOT / "state"))
 
 
 def _safe_target(target: str) -> str:

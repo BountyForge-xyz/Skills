@@ -942,7 +942,7 @@ async def main():
 
     # Persist WAF profile to the state bus for other agents/engines to consume
     try:
-        state_root = os.environ.get("BF_STATE_DIR", "/home/sandbox/state")
+        state_root = os.environ.get("BF_STATE_DIR", str(ROOT / "state"))
         safe = args.target.replace("/", "_").replace(":", "_").replace("*", "_")
         bus_dir = Path(state_root) / "bus" / safe
         bus_dir.mkdir(parents=True, exist_ok=True)
