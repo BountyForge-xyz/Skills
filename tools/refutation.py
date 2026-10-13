@@ -17,6 +17,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 import hashlib
 import subprocess
@@ -103,6 +104,82 @@ class RefutationRecord:
             self.created_at = now
         if not self.updated_at:
             self.updated_at = now
+
+
+# ---------------------------------------------------------------------------
+# Gate 0 — deterministic self-concession scanner (runs BEFORE any model pass)
+# ---------------------------------------------------------------------------
+#
+# The 4-gate refutation is LLM-driven: every verdict is parsed from a model's
+# answer. That leaves two holes this scanner closes, deterministically and for
+# free (no API call):
+#   1. A finding that refutes itself in its own words ("self-harm only", "no
+#      external victim", "not economically viable") should never cost a paid
+#      pass, and a model should never be able to "confirm" it anyway.
+#   2. A finding that concedes a severity-capping precondition ("requires the
+#      owner", "no funds at risk", "fee-drag only") can never be CONFIRMED,
+#      regardless of what the model says — so the verdict is clamped.
+#
+# These phrases mirror the KILL criteria already stated in the Gate 4 prompt;
+# here a deterministic rule OWNS the verdict instead of delegating it.
+
+# KILLED: the finding concedes there is no valid victim or no profit.
+_KILL_CONCESSIONS: List[Tuple[str, str]] = [
+    (r"self[\s-]?harm only", "self-harm only"),
+    (r"attacker (?:only )?(?:loses|risks|forfeits|burns|spends) "
+     r"(?:their|its|his|her|the attacker'?s) own (?:funds|money|capital|tokens)",
+     "attacker loses only their own funds"),
+    (r"no (?:other|external) victim", "no external victim"),
+    (r"only affects the attacker", "only affects the attacker"),
+    (r"not (?:economically )?(?:viable|profitable)", "not economically viable"),
+    (r"costs? more (?:gas )?than (?:it|the attacker) "
+     r"(?:yields|gains|profits|recovers|nets|earns)",
+     "attack costs more than it yields"),
+]
+
+# DEMOTED: the finding concedes a severity-capping precondition/limitation.
+_DEMOTE_CONCESSIONS: List[Tuple[str, str]] = [
+    (r"requires? (?:a |the )?(?:contract |protocol )?"
+     r"(?:owner|admin|administrator|governance|privileged role|"
+     r"privileged account|trusted operator|trusted admin)",
+     "requires a privileged actor"),
+    (r"no (?:direct )?(?:fund|funds|financial|monetary) (?:loss|at risk)",
+     "no funds at risk"),
+    (r"fee[\s-]?drag", "fee-drag only"),
+    (r"purely theoretical", "purely theoretical"),
+    (r"cannot be demonstrated", "cannot be demonstrated"),
+    (r"requires a config(?:uration)? (?:that )?(?:no ?one|nobody) "
+     r"(?:deploys|uses|runs)",
+     "requires a configuration nobody deploys"),
+]
+
+
+def _finding_text(finding: Dict) -> str:
+    """Flatten a finding's string fields into one lower-cased blob to scan."""
+    parts: List[str] = []
+    for value in finding.values():
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple)):
+            parts.extend(v for v in value if isinstance(v, str))
+    return "\n".join(parts).lower()
+
+
+def scan_concessions(finding: Dict) -> Optional[Tuple[FindingVerdict, str, str]]:
+    """Deterministic Gate 0.
+
+    Returns (verdict, category, matched_phrase), or None if the finding makes
+    no self-defeating concession. KILLED short-circuits the model passes;
+    DEMOTED clamps a later CONFIRMED verdict down to DEMOTED.
+    """
+    text = _finding_text(finding)
+    for pattern, label in _KILL_CONCESSIONS:
+        if re.search(pattern, text):
+            return (FindingVerdict.KILLED, "kill", label)
+    for pattern, label in _DEMOTE_CONCESSIONS:
+        if re.search(pattern, text):
+            return (FindingVerdict.DEMOTED, "demote", label)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +440,32 @@ class RefutationEngine:
                 endpoint=finding.get("endpoint", ""),
             )
 
+        # --- Gate 0: deterministic self-concession scan (no model spend) ---
+        concession = scan_concessions(finding)
+        if concession is not None and concession[0] == FindingVerdict.KILLED:
+            _verdict, _cat, phrase = concession
+            now = datetime.now(timezone.utc).isoformat()
+            det = RefutationPass(
+                pass_number=len(record.passes) + 1,
+                model="deterministic",
+                started_at=now,
+                completed_at=now,
+                verdict=FindingVerdict.KILLED,
+                kill_argument=(
+                    f'Gate 0 (deterministic): finding concedes "{phrase}" — '
+                    "killed without a model pass."),
+            )
+            det.gate_results.append(GateEvaluation(
+                gate="concession", result=GateResult.REJECTED,
+                reasoning=f"self-concession: {phrase}", confidence=1.0))
+            record.passes.append(det)
+            record.total_passes = len(record.passes)
+            record.killed_passes = sum(
+                1 for p in record.passes if p.verdict == FindingVerdict.KILLED)
+            record.final_verdict = FindingVerdict.KILLED
+            self._save_record(record)
+            return record
+
         for p in range(passes):
             pass_num = len(record.passes) + 1
             started = datetime.now(timezone.utc).isoformat()
@@ -397,6 +500,13 @@ class RefutationEngine:
             record.final_verdict = FindingVerdict.DEMOTED
         else:
             record.final_verdict = FindingVerdict.LEAD
+
+        # Gate 0 clamp: a finding that conceded a severity-capping precondition
+        # can never be CONFIRMED, whatever the model passes concluded.
+        if (concession is not None
+                and concession[0] == FindingVerdict.DEMOTED
+                and record.final_verdict == FindingVerdict.CONFIRMED):
+            record.final_verdict = FindingVerdict.DEMOTED
 
         self._save_record(record)
         return record
