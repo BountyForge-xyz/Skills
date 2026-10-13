@@ -59,6 +59,30 @@ git clone https://github.com/Gabson0x/bountyforge.git ~/.claude/skills/bountyfor
 
 Start a fresh Claude Code session — skills load at startup.
 
+#### Windows
+
+The bundled `skills/` tree nests reference paths up to ~163 characters (e.g.
+`skills/smart-contract-audit/reference/anchor/...`). Combined with a deep
+install directory this can exceed the legacy Windows `MAX_PATH` limit (260),
+and `git` aborts the **entire** checkout with `unable to checkout working
+tree` — leaving a half-populated skill. Clone with long paths enabled:
+
+```bash
+git clone -c core.longpaths=true https://github.com/Gabson0x/bountyforge.git ~/.claude/skills/bountyforge
+```
+
+If you already have a failed/partial clone, enable it and re-checkout:
+
+```bash
+git -C ~/.claude/skills/bountyforge config core.longpaths true
+git -C ~/.claude/skills/bountyforge checkout -f
+```
+
+> For a system-wide fix, enable long paths once (`git config --global
+> core.longpaths true`) and, on Windows 10 1607+, set the OS policy
+> `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`.
+> Shell helper scripts (`tools/recon_engine.sh`) run under Git Bash or WSL.
+
 ### Claude.ai (web/app)
 
 1. Go to **Customize → Skills**
